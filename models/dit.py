@@ -303,18 +303,27 @@ class DDiTBlockCausal(nn.Module):
 
 
 class DDiTBlock(nn.Module):
+  """_summary_
+
+
+  Args:
+      nn (_type_): _description_
+  """
   def __init__(self, dim, n_heads, adaLN,
-               cond_dim=None, mlp_ratio=4,
-               dropout=0.1):
+              cond_dim=None, mlp_ratio=4,
+              dropout=0.1):
     super().__init__()
+    # マルチヘッド数とAdaptive LayerNorm適用フラグ
     self.n_heads = n_heads
     self.adaLN = adaLN
 
+    # --- Attentionサブレイヤーの定義 ---
     self.norm1 = LayerNorm(dim)
     self.attn_qkv = nn.Linear(dim, 3 * dim, bias=False)
     self.attn_out = nn.Linear(dim, dim, bias=False)
     self.dropout1 = nn.Dropout(dropout)
-
+    
+    # --- MLPサブレイヤーの定義 ---
     self.norm2 = LayerNorm(dim)
     self.mlp = nn.Sequential(
       nn.Linear(dim, mlp_ratio * dim, bias=True),
@@ -330,6 +339,10 @@ class DDiTBlock(nn.Module):
 
 
   def _get_bias_dropout_scale(self):
+    """
+    トレーニング時と推論時で異なる融合関数を選択。
+    bias_dropout_add_scale_fused_train / inference のどちらかを返す。
+    """
     if self.training:
       return bias_dropout_add_scale_fused_train
     else:
@@ -348,9 +361,10 @@ class DDiTBlock(nn.Module):
       # self.adaLN_modulation(c)[:, None]: (128, 1, 1536)
       # "" .chunk(6, dim=2) returns 6 tuples of shapes (128, 1, 256)
       (shift_msa, scale_msa, gate_msa, shift_mlp,
-       scale_mlp, gate_mlp) = self.adaLN_modulation(c)[:, None].chunk(6, dim=2)
+      scale_mlp, gate_mlp) = self.adaLN_modulation(c)[:, None].chunk(6, dim=2)
       x = modulate_fused(x, shift_msa, scale_msa)
 
+    # Q, K, V を計算し、形状を (batch, seq, 3, heads, head_dim) に変形
     qkv = einops.rearrange(
       self.attn_qkv(x),
       'b s (three h d) -> b s three h d',
@@ -397,7 +411,7 @@ class EmbeddingLayer(nn.Module):
 
 class DDiTFinalLayer(nn.Module):
   def __init__(self, hidden_size, out_channels, cond_dim,
-               adaLN):
+              adaLN):
     super().__init__()
     self.norm_final = LayerNorm(hidden_size)
     self.linear = nn.Linear(hidden_size, out_channels)

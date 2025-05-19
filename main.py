@@ -219,14 +219,14 @@ def main(config):
   tokenizer = dataloader.get_tokenizer(config)
   if config.algo.name == 'ar':
     diffusion_model = algo.AR
-  elif config.algo.name == 'mdlm':
-    diffusion_model = algo.MDLM
+  # elif config.algo.name == 'mdlm':
+  #   diffusion_model = algo.MDLM
   elif config.algo.name == 'duo_base':
     diffusion_model = algo.DUO_BASE
-  elif config.algo.name == 'd3pm':
-    diffusion_model = algo.D3PMAbsorb
-  elif config.algo.name == 'sedd':
-    diffusion_model = algo.SEDDAbsorb
+  # elif config.algo.name == 'd3pm':
+  #   diffusion_model = algo.D3PMAbsorb
+  # elif config.algo.name == 'sedd':
+  #   diffusion_model = algo.SEDDAbsorb
   elif config.algo.name == 'duo':
     diffusion_model = algo.DUO
   elif config.algo.name == 'distillation':

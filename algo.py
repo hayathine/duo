@@ -12,273 +12,273 @@ import trainer_base
 import utils
 
 
-class AR(trainer_base.TrainerBase):
-  def __init__(self, config, tokenizer):
-    vocab_size = tokenizer.vocab_size
-    if (not hasattr(tokenizer, 'mask_token')
-        or tokenizer.mask_token is None):
-      self.mask_index = vocab_size
-      vocab_size += 1
-    else:
-      self.mask_index = tokenizer.mask_token_id
-    super().__init__(config, tokenizer,
-                     vocab_size=vocab_size)
-    self.save_hyperparameters()
-    self._validate_configuration()
+# class AR(trainer_base.TrainerBase):
+#   def __init__(self, config, tokenizer):
+#     vocab_size = tokenizer.vocab_size
+#     if (not hasattr(tokenizer, 'mask_token')
+#         or tokenizer.mask_token is None):
+#       self.mask_index = vocab_size
+#       vocab_size += 1
+#     else:
+#       self.mask_index = tokenizer.mask_token_id
+#     super().__init__(config, tokenizer,
+#                      vocab_size=vocab_size)
+#     self.save_hyperparameters()
+#     self._validate_configuration()
 
-  def _validate_configuration(self):
-    super()._validate_configuration()
-    assert not self.config.algo.time_conditioning
-    assert self.config.prior.type == 'none'
+#   def _validate_configuration(self):
+#     super()._validate_configuration()
+#     assert not self.config.algo.time_conditioning
+#     assert self.config.prior.type == 'none'
 
-  def _process_model_input(self, x0, valid_tokens):
-    input_tokens = x0[:, :-1]
-    output_tokens = x0[:, 1:]
-    valid_tokens = valid_tokens[:, 1:]
-    return input_tokens, output_tokens, valid_tokens
+#   def _process_model_input(self, x0, valid_tokens):
+#     input_tokens = x0[:, :-1]
+#     output_tokens = x0[:, 1:]
+#     valid_tokens = valid_tokens[:, 1:]
+#     return input_tokens, output_tokens, valid_tokens
 
-  def nll(self, input_tokens, output_tokens,
-          current_accumulation_step):
-    del current_accumulation_step
-    output = self.backbone(input_tokens, None)
-    output[:, :, self.mask_index] = self.neg_infinity
-    output = output.log_softmax(-1)
-    return - output.gather(
-      -1, output_tokens[:, :, None])[:, :, 0]
+#   def nll(self, input_tokens, output_tokens,
+#           current_accumulation_step):
+#     del current_accumulation_step
+#     output = self.backbone(input_tokens, None)
+#     output[:, :, self.mask_index] = self.neg_infinity
+#     output = output.log_softmax(-1)
+#     return - output.gather(
+#       -1, output_tokens[:, :, None])[:, :, 0]
 
-  def generate_samples(self, num_samples, **kwargs):
-    # precompute token buffer
-    num_pred_tokens = self.num_tokens - 1
-    x = torch.zeros(
-      (num_samples, num_pred_tokens + 1),
-      dtype=torch.long,
-      device=self.device)
-    x[:, 0] = self.tokenizer.bos_token_id
-    # precompute noise
-    noise = (torch.distributions.Gumbel(0, 1)
-             .sample((num_samples, num_pred_tokens, self.vocab_size))
-             .to(self.device))
-    if self.config.sampling.use_float64:
-      noise = noise.to(torch.float64)
-    for i in range(num_pred_tokens):
-      output = self.backbone(x[:, :i + 1], None)
-      output[:, :, self.mask_index] = self.neg_infinity
-      output = output.log_softmax(-1)
-      y = (output[:, -1, :] + noise[:, i, :]).argmax(-1)
-      x[:, i + 1] = y
-    return x
+#   def generate_samples(self, num_samples, **kwargs):
+#     # precompute token buffer
+#     num_pred_tokens = self.num_tokens - 1
+#     x = torch.zeros(
+#       (num_samples, num_pred_tokens + 1),
+#       dtype=torch.long,
+#       device=self.device)
+#     x[:, 0] = self.tokenizer.bos_token_id
+#     # precompute noise
+#     noise = (torch.distributions.Gumbel(0, 1)
+#              .sample((num_samples, num_pred_tokens, self.vocab_size))
+#              .to(self.device))
+#     if self.config.sampling.use_float64:
+#       noise = noise.to(torch.float64)
+#     for i in range(num_pred_tokens):
+#       output = self.backbone(x[:, :i + 1], None)
+#       output[:, :, self.mask_index] = self.neg_infinity
+#       output = output.log_softmax(-1)
+#       y = (output[:, -1, :] + noise[:, i, :]).argmax(-1)
+#       x[:, i + 1] = y
+#     return x
 
-  def _process_sigma(self, sigma):
-    del sigma
-    return None
+#   def _process_sigma(self, sigma):
+#     del sigma
+#     return None
 
 
-class MDLM(trainer_base.AbsorbingState):
-  def __init__(self, config, tokenizer):
-    super().__init__(config, tokenizer)
-    self._validate_configuration()
+# class MDLM(trainer_base.AbsorbingState):
+#   def __init__(self, config, tokenizer):
+#     super().__init__(config, tokenizer)
+#     self._validate_configuration()
 
-  def _validate_configuration(self):
-    # ancestral sampling isn't desirable because it's slow
-    assert self.sampler == 'ancestral_cache'
+#   def _validate_configuration(self):
+#     # ancestral sampling isn't desirable because it's slow
+#     assert self.sampler == 'ancestral_cache'
 
-  def _process_model_output(self, model_output, xt, sigma):
-    del sigma
-    model_output[:, :, self.mask_index] += self.neg_infinity
+#   def _process_model_output(self, model_output, xt, sigma):
+#     del sigma
+#     model_output[:, :, self.mask_index] += self.neg_infinity
     
-    # Normalize the model_output such that x.exp() is
-    # a probability distribution over vocab_size.
-    model_output = model_output - torch.logsumexp(
-      model_output, dim=-1, keepdim=True)
-    # Apply updates directly in the logits matrix.
-    # For the logits of the unmasked tokens, set all values
-    # to -infinity except for the indices corresponding to
-    # the unmasked tokens.
-    unmasked_indices = (xt != self.mask_index)
-    model_output[unmasked_indices] = self.neg_infinity
-    model_output[unmasked_indices, xt[unmasked_indices]] = 0
-    return model_output
+#     # Normalize the model_output such that x.exp() is
+#     # a probability distribution over vocab_size.
+#     model_output = model_output - torch.logsumexp(
+#       model_output, dim=-1, keepdim=True)
+#     # Apply updates directly in the logits matrix.
+#     # For the logits of the unmasked tokens, set all values
+#     # to -infinity except for the indices corresponding to
+#     # the unmasked tokens.
+#     unmasked_indices = (xt != self.mask_index)
+#     model_output[unmasked_indices] = self.neg_infinity
+#     model_output[unmasked_indices, xt[unmasked_indices]] = 0
+#     return model_output
 
-  def nll_per_token(self, log_x_theta, xt, x0, alpha_t,
-                    dalpha_t, low_var=False):
-    del xt
-    log_p_theta = torch.gather(
-      input=log_x_theta,
-      dim=-1,
-      index=x0[:, :, None]).squeeze(-1)
-    return log_p_theta * dalpha_t / (1 - alpha_t)
+#   def nll_per_token(self, log_x_theta, xt, x0, alpha_t,
+#                     dalpha_t, low_var=False):
+#     del xt
+#     log_p_theta = torch.gather(
+#       input=log_x_theta,
+#       dim=-1,
+#       index=x0[:, :, None]).squeeze(-1)
+#     return log_p_theta * dalpha_t / (1 - alpha_t)
 
-  def _get_score(self, x, sigma):
-    model_output = self.forward(x, sigma)
-    # score(x, t) = p_t(y) / p_t(x)
-    # => log score(x, t) = log p_t(y) - log p_t(x)
+#   def _get_score(self, x, sigma):
+#     model_output = self.forward(x, sigma)
+#     # score(x, t) = p_t(y) / p_t(x)
+#     # => log score(x, t) = log p_t(y) - log p_t(x)
     
-    # case 1: x = masked
-    #   (i) y = unmasked
-    #     log score(x, t) = log p_\theta(x)|_y + log k
-    #     where k = exp(- sigma) / (1 - exp(- sigma))
-    #   (ii) y = masked
-    #     log score(x, t) = 0
+#     # case 1: x = masked
+#     #   (i) y = unmasked
+#     #     log score(x, t) = log p_\theta(x)|_y + log k
+#     #     where k = exp(- sigma) / (1 - exp(- sigma))
+#     #   (ii) y = masked
+#     #     log score(x, t) = 0
 
-    # case 2: x = unmasked
-    #   (i) y != masked, y != x
-    #     log score(x_i, t) = - inf
-    #   (ii) y = x 
-    #     log score(x_i, t) = 0
-    #   (iii) y = masked token
-    #     log score(x_i, t) = - log k
-    #     where k = exp(- sigma) / (1 - exp(- sigma))
+#     # case 2: x = unmasked
+#     #   (i) y != masked, y != x
+#     #     log score(x_i, t) = - inf
+#     #   (ii) y = x 
+#     #     log score(x_i, t) = 0
+#     #   (iii) y = masked token
+#     #     log score(x_i, t) = - log k
+#     #     where k = exp(- sigma) / (1 - exp(- sigma))
     
-    log_k = - torch.log(torch.expm1(sigma)).squeeze(-1)
-    assert log_k.ndim == 1
+#     log_k = - torch.log(torch.expm1(sigma)).squeeze(-1)
+#     assert log_k.ndim == 1
     
-    masked_score = model_output + log_k[:, None, None]
-    masked_score[:, :, self.mask_index] = 0
+#     masked_score = model_output + log_k[:, None, None]
+#     masked_score[:, :, self.mask_index] = 0
 
-    unmasked_score = self.neg_infinity * torch.ones_like(
-      model_output)
-    unmasked_score = torch.scatter(
-      unmasked_score,
-      -1,
-      x[..., None],
-      torch.zeros_like(unmasked_score[..., :1]))
-    unmasked_score[:, :, self.mask_index] = - (
-      log_k[:, None] * torch.ones_like(x))
+#     unmasked_score = self.neg_infinity * torch.ones_like(
+#       model_output)
+#     unmasked_score = torch.scatter(
+#       unmasked_score,
+#       -1,
+#       x[..., None],
+#       torch.zeros_like(unmasked_score[..., :1]))
+#     unmasked_score[:, :, self.mask_index] = - (
+#       log_k[:, None] * torch.ones_like(x))
     
-    masked_indices = (x == self.mask_index).to(
-      model_output.dtype)[:, :, None]
-    model_output = (
-      masked_score * masked_indices
-      + unmasked_score * (1 - masked_indices))
-    return model_output.exp()
+#     masked_indices = (x == self.mask_index).to(
+#       model_output.dtype)[:, :, None]
+#     model_output = (
+#       masked_score * masked_indices
+#       + unmasked_score * (1 - masked_indices))
+#     return model_output.exp()
 
 
-class D3PMAbsorb(trainer_base.AbsorbingState):
-  def __init__(self, config, tokenizer):
-    super().__init__(config, tokenizer)
-    self._validate_configuration()
+# class D3PMAbsorb(trainer_base.AbsorbingState):
+#   def __init__(self, config, tokenizer):
+#     super().__init__(config, tokenizer)
+#     self._validate_configuration()
 
-  def _validate_configuration(self):
-    super()._validate_configuration()
-    assert self.noise.type == 'log-linear'
-    assert self.parameterization == 'mean'
+#   def _validate_configuration(self):
+#     super()._validate_configuration()
+#     assert self.noise.type == 'log-linear'
+#     assert self.parameterization == 'mean'
 
-  def _process_model_output(self, model_output, xt, sigma):
-    del xt 
-    del sigma
-    if self.subs_masking:
-      model_output[:, :, self.mask_index] += self.neg_infinity
-    return model_output.log_softmax(dim=-1)
+#   def _process_model_output(self, model_output, xt, sigma):
+#     del xt 
+#     del sigma
+#     if self.subs_masking:
+#       model_output[:, :, self.mask_index] += self.neg_infinity
+#     return model_output.log_softmax(dim=-1)
 
-  def nll_per_token(self, log_x_theta, xt, x0, alpha_t,
-                    dalpha_t, low_var=False):
-    del dalpha_t
-    assert not low_var
-    dt = 1 / self.T
-    t = 1 - alpha_t  # Only valid for log-linear schedule.
-    t = t.clamp(0., 1.0 - 1e-4)
-    alpha_t = alpha_t + torch.zeros_like(xt)
-    alpha_s = t - dt + torch.zeros_like(xt)
-    assert alpha_s.shape == xt.shape
-    assert alpha_t.shape == xt.shape
-    log_x_theta_at_x0 = torch.gather(
-      log_x_theta, -1, x0[:, :, None]).squeeze(-1)
-    log_x_theta_at_m = log_x_theta[:, :, self.mask_index]
-    x_theta_at_m = log_x_theta_at_m.exp()
+#   def nll_per_token(self, log_x_theta, xt, x0, alpha_t,
+#                     dalpha_t, low_var=False):
+#     del dalpha_t
+#     assert not low_var
+#     dt = 1 / self.T
+#     t = 1 - alpha_t  # Only valid for log-linear schedule.
+#     t = t.clamp(0., 1.0 - 1e-4)
+#     alpha_t = alpha_t + torch.zeros_like(xt)
+#     alpha_s = t - dt + torch.zeros_like(xt)
+#     assert alpha_s.shape == xt.shape
+#     assert alpha_t.shape == xt.shape
+#     log_x_theta_at_x0 = torch.gather(
+#       log_x_theta, -1, x0[:, :, None]).squeeze(-1)
+#     log_x_theta_at_m = log_x_theta[:, :, self.mask_index]
+#     x_theta_at_m = log_x_theta_at_m.exp()
     
-    term_1_coef = dt / t
-    term_1_log_nr = torch.log(alpha_t * x_theta_at_m / t + 1)
-    term_1_log_dr = log_x_theta_at_x0
+#     term_1_coef = dt / t
+#     term_1_log_nr = torch.log(alpha_t * x_theta_at_m / t + 1)
+#     term_1_log_dr = log_x_theta_at_x0
     
-    term_2_coef = 1 - dt / t
-    term_2_log_nr = term_1_log_nr
-    term_2_log_dr = torch.log(
-      alpha_s * x_theta_at_m / (t - dt) + 1)
-    L_vb_masked = (
-      term_1_coef * (term_1_log_nr - term_1_log_dr)
-      + term_2_coef * (term_2_log_nr - term_2_log_dr))
+#     term_2_coef = 1 - dt / t
+#     term_2_log_nr = term_1_log_nr
+#     term_2_log_dr = torch.log(
+#       alpha_s * x_theta_at_m / (t - dt) + 1)
+#     L_vb_masked = (
+#       term_1_coef * (term_1_log_nr - term_1_log_dr)
+#       + term_2_coef * (term_2_log_nr - term_2_log_dr))
 
-    diffusion_loss = self.T * L_vb_masked * (xt == self.mask_index)
-    return self._reconstruction_loss(x0) + diffusion_loss
+#     diffusion_loss = self.T * L_vb_masked * (xt == self.mask_index)
+#     return self._reconstruction_loss(x0) + diffusion_loss
 
 
-class SEDDAbsorb(trainer_base.AbsorbingState):
-  def __init__(self, config, tokenizer):
-    super().__init__(config, tokenizer)
-    self._validate_configuration()
+# class SEDDAbsorb(trainer_base.AbsorbingState):
+#   def __init__(self, config, tokenizer):
+#     super().__init__(config, tokenizer)
+#     self._validate_configuration()
 
-  def _validate_configuration(self):
-    super()._validate_configuration()
-    assert self.config.sampling.predictor == 'analytic'
+#   def _validate_configuration(self):
+#     super()._validate_configuration()
+#     assert self.config.sampling.predictor == 'analytic'
 
-  def _get_score(self, x, sigma):
-    return self.forward(x, sigma).exp()
+#   def _get_score(self, x, sigma):
+#     return self.forward(x, sigma).exp()
 
-  def _process_model_output(self, model_output, xt, sigma):
-    esigm1_log = torch.where(
-      sigma < 0.5,
-      torch.expm1(sigma),
-      sigma.exp() - 1).log().to(model_output.dtype)
-    # logits shape
-    # (batch_size, context_length, vocab_size)
-    model_output = (model_output
-                    - esigm1_log[:, None, None]
-                    - np.log(model_output.shape[-1] - 1))
-    # The below scatter operation sets the log score
-    # for the input word to 0.
-    model_output = torch.scatter(
-      model_output, -1, xt[..., None],
-      torch.zeros_like(model_output[..., :1]))
-    return model_output
+#   def _process_model_output(self, model_output, xt, sigma):
+#     esigm1_log = torch.where(
+#       sigma < 0.5,
+#       torch.expm1(sigma),
+#       sigma.exp() - 1).log().to(model_output.dtype)
+#     # logits shape
+#     # (batch_size, context_length, vocab_size)
+#     model_output = (model_output
+#                     - esigm1_log[:, None, None]
+#                     - np.log(model_output.shape[-1] - 1))
+#     # The below scatter operation sets the log score
+#     # for the input word to 0.
+#     model_output = torch.scatter(
+#       model_output, -1, xt[..., None],
+#       torch.zeros_like(model_output[..., :1]))
+#     return model_output
 
-  def nll_per_token(self, log_x_theta, xt, x0, alpha_t,
-                    dalpha_t, low_var=False):
-    """Computes the SEDD loss for the Absorbing State Diffusion.
+#   def nll_per_token(self, log_x_theta, xt, x0, alpha_t,
+#                     dalpha_t, low_var=False):
+#     """Computes the SEDD loss for the Absorbing State Diffusion.
 
-    Args:
-      log_x_theta: float torch.Tensor with shape (batch_size,
-          context_length, vocab_size),
-          log score, output of the denoising network.
-      xt: int torch.Tensor with shape (batch_size,
-          context_length), input.
-      x0: int torch.Tensor with shape (batch_size,
-          context_length), input.
-      alpha_t: float torch.Tensor with shape (batch_size, 1),
-          signal level.
-      alpha_t: float torch.Tensor with shape (batch_size, 1),
-          signal level.
-      dalpha_t: float or float torch.Tensor with shape (batch_size, 1),
-          time derivative of signal level.
-      low_var: bool, low variance loss during training.
+#     Args:
+#       log_x_theta: float torch.Tensor with shape (batch_size,
+#           context_length, vocab_size),
+#           log score, output of the denoising network.
+#       xt: int torch.Tensor with shape (batch_size,
+#           context_length), input.
+#       x0: int torch.Tensor with shape (batch_size,
+#           context_length), input.
+#       alpha_t: float torch.Tensor with shape (batch_size, 1),
+#           signal level.
+#       alpha_t: float torch.Tensor with shape (batch_size, 1),
+#           signal level.
+#       dalpha_t: float or float torch.Tensor with shape (batch_size, 1),
+#           time derivative of signal level.
+#       low_var: bool, low variance loss during training.
     
-    Returns:
-      loss with shape (batch_size, context_length).
-    """
-    assert not low_var
-    masked_indices = xt == self.mask_index
-    sigma = self._sigma_from_alphat(alpha_t)
-    dsigma = - dalpha_t / alpha_t
+#     Returns:
+#       loss with shape (batch_size, context_length).
+#     """
+#     assert not low_var
+#     masked_indices = xt == self.mask_index
+#     sigma = self._sigma_from_alphat(alpha_t)
+#     dsigma = - dalpha_t / alpha_t
 
-    expsig_minus_1 = torch.expm1(sigma).expand_as(xt)
-    q_ratio = 1 / expsig_minus_1[masked_indices]
+#     expsig_minus_1 = torch.expm1(sigma).expand_as(xt)
+#     q_ratio = 1 / expsig_minus_1[masked_indices]
 
-    words_that_were_masked = x0[masked_indices]
+#     words_that_were_masked = x0[masked_indices]
 
-    neg_term = q_ratio * torch.gather(
-      log_x_theta[masked_indices],
-      -1,
-      words_that_were_masked[..., None]).squeeze(-1)
-    score = log_x_theta[masked_indices].exp()
-    if self.mask_index == self.vocab_size - 1:
-      pos_term = score[:, :-1].sum(dim=-1)
-    else:
-      pos_term = score[:, : self.mask_index].sum(
-        dim=-1) + score[:, self.mask_index + 1:].sum(dim=-1)
-    const = q_ratio * (q_ratio.log() - 1)
+#     neg_term = q_ratio * torch.gather(
+#       log_x_theta[masked_indices],
+#       -1,
+#       words_that_were_masked[..., None]).squeeze(-1)
+#     score = log_x_theta[masked_indices].exp()
+#     if self.mask_index == self.vocab_size - 1:
+#       pos_term = score[:, :-1].sum(dim=-1)
+#     else:
+#       pos_term = score[:, : self.mask_index].sum(
+#         dim=-1) + score[:, self.mask_index + 1:].sum(dim=-1)
+#     const = q_ratio * (q_ratio.log() - 1)
 
-    entropy = torch.zeros(* xt.shape, device=xt.device)
-    entropy[masked_indices] += pos_term - neg_term + const
-    return dsigma * entropy
+#     entropy = torch.zeros(* xt.shape, device=xt.device)
+#     entropy[masked_indices] += pos_term - neg_term + const
+#     return dsigma * entropy
 
 
 class DUO_BASE(trainer_base.UniformState):
@@ -304,7 +304,7 @@ class DUO_BASE(trainer_base.UniformState):
 
   def _compute_posterior(self, x, xt, alpha_s, alpha_t):
     """Computes the posterior / approximate posterior.
-
+    事後分布（または近似事後分布）を計算
     Args:
       x: Either clean input `x0` (one-hot),
         or model's predicted `x_theta` of shape (B, L, V).
@@ -321,19 +321,50 @@ class DUO_BASE(trainer_base.UniformState):
       alpha_s = alpha_s.unsqueeze(-1)
     if alpha_t.ndim == 2:
       alpha_t = alpha_t.unsqueeze(-1)
+
+    # beta の比率 alpha_t / alpha_s
     alpha_ts = alpha_t / alpha_s
+    # ノイズレベルの差分
     d_alpha = alpha_s - alpha_t
+
+    # xt のインデックスを one-hot ベクトルに変換
     xt_one_hot = F.one_hot(xt, self.vocab_size).to(
       self.dtype).to(self.device)
-    return (
-      (alpha_t * self.vocab_size * x * xt_one_hot + (
-        alpha_ts - alpha_t) * xt_one_hot + d_alpha * x + (
-          1 - alpha_ts) * (1 - alpha_s) / self.vocab_size) / (
-            alpha_t * self.vocab_size * torch.gather(
-              x, -1, xt[..., None]) + (1 - alpha_t)))
+
+    # 分子: 各項の線形結合
+    numerator = (
+        alpha_t * self.vocab_size * x * xt_one_hot             # 元のデータ x とノイズ x_t の積にスケーリング
+        + (alpha_ts - alpha_t) * xt_one_hot                     # alpha比率差分によるノイズ成分の調整
+        + d_alpha * x                                          # ノイズレベルの差分によるクリーンデータ成分
+        + (1 - alpha_ts) * (1 - alpha_s) / self.vocab_size      # 残余確率質量を一様分布として割り当てる項
+    )
+
+    # 分母: 正規化定数（選択されたトークンに対応する確率の総和）
+    denom = (
+        alpha_t * self.vocab_size * torch.gather(x, -1, xt[..., None])
+        + (1 - alpha_t)
+    )
+
+    # 事後分布を返す
+    return numerator / denom
+
 
   def nll_per_token(self, log_x_theta, xt, x0, alpha_t,
                     dalpha_t, low_var=False):
+    """
+    トークンごとの負の対数尤度 (NLL) を計算する関数。
+
+    Args:
+      log_x_theta: モデルが予測した各トークンの対数確率（shape: (B, L, V)）
+      xt: ノイズを加えられた潜在トークンのインデックス（shape: (B, L)）
+      x0: 元のクリーンなトークンのインデックス（shape: (B, L)）
+      alpha_t: 時刻 t におけるノイズレベル（shape: (B, L) または (B, L, 1)）
+      dalpha_t: 時刻 t におけるノイズレベルの差分 dα_t（shape: (B, L) または (B, L, 1)）
+      low_var: 低分散モードのフラグ（未使用）
+
+    Returns:
+      diffusion_loss: 各バッチ・各位置ごとの拡散損失（shape: (B, L)）
+    """
     assert alpha_t.ndim == 2
     assert x0.ndim == 2
     assert xt.ndim == 2
@@ -353,7 +384,7 @@ class DUO_BASE(trainer_base.UniformState):
                                 - 1 / xbar_theta_xt)
     
     const = (1 - alpha_t) / (self.vocab_size * alpha_t
-                             + 1 - alpha_t)
+                            + 1 - alpha_t)
     term2_coefs = x_eq_xt * const + x_neq_xt
     term2_offset = ((self.vocab_size - 1) * const * x_eq_xt
                     - (1 / const) * x_neq_xt) * const.log()
@@ -369,26 +400,26 @@ class DUO_BASE(trainer_base.UniformState):
     assert diffusion_loss.ndim == 2
     return diffusion_loss
 
-  def _ancestral_update(self, x, t, dt, p_x0=None,
-                   noise_removal_step=False):
-    del p_x0
-    _, alpha_t = self.noise(t)
-    if noise_removal_step:
-      alpha_s = torch.ones_like(alpha_t)
-    else:
-      _, alpha_s = self.noise(t - dt)
-    sigma_t = self._sigma_from_alphat(alpha_t)
-    assert alpha_t.ndim == 2
+  # def _ancestral_update(self, x, t, dt, p_x0=None,
+  #                 noise_removal_step=False):
+  #   del p_x0
+  #   _, alpha_t = self.noise(t)
+  #   if noise_removal_step:
+  #     alpha_s = torch.ones_like(alpha_t)
+  #   else:
+  #     _, alpha_s = self.noise(t - dt)
+  #   sigma_t = self._sigma_from_alphat(alpha_t)
+  #   assert alpha_t.ndim == 2
     
-    q_xs = self._compute_posterior(
-      x=self.forward(x, sigma_t).exp(),
-      xt=x,
-      alpha_s=alpha_s,
-      alpha_t=alpha_t)
-    if self.p_nucleus < 1:
-      q_xs = utils.top_k_top_p_filtering(
-        q_xs.log(), top_p=self.p_nucleus)
-    return None, trainer_base.sample_categorical(q_xs)
+  #   q_xs = self._compute_posterior(
+  #     x=self.forward(x, sigma_t).exp(),
+  #     xt=x,
+  #     alpha_s=alpha_s,
+  #     alpha_t=alpha_t)
+  #   if self.p_nucleus < 1:
+  #     q_xs = utils.top_k_top_p_filtering(
+  #       q_xs.log(), top_p=self.p_nucleus)
+  #   return None, trainer_base.sample_categorical(q_xs)
 
 
 class Integral(torch.autograd.Function):
@@ -424,7 +455,7 @@ class DUO(DUO_BASE):
   def __init__(self, config, tokenizer):
     super().__init__(config, tokenizer)
     with fsspec.open(self.config.algo.integral_cache_path,
-                     'rb') as f:
+                    'rb') as f:
       self.integral_cache = pickle.load(f)
     self.integral_cache['pt'] = torch.from_numpy(
       self.integral_cache['pt'])
@@ -448,6 +479,13 @@ class DUO(DUO_BASE):
     return self
 
   def _compute_gumbel_tau_inverse(self):
+    """
+    Gumbel 分布の温度パラメータ τ の逆数を、訓練ステップに応じたスケジュールで計算する関数。
+
+    - curriculum_start 以前：対数スケール start 値を使用
+    - curriculum_start ～ curriculum_end：start から end へ線形補間
+    - curriculum_end 以降：極小値（log10 = -10）を設定
+    """
     start = self.gumbel_tau_log10_start
     end = self.gumbel_tau_log10_end
     delta = end - start
@@ -462,45 +500,91 @@ class DUO(DUO_BASE):
     return 10 ** (-tau)
 
   def training_step(self, batch, batch_idx):
+    # 学習のログ
     self.log(name='gumbel_tau_log10',
-             value=1 / self._compute_gumbel_tau_inverse(),
-             on_step=True,
-             on_epoch=False,
-             sync_dist=True)
+            value=1 / self._compute_gumbel_tau_inverse(),
+            on_step=True,
+            on_epoch=False,
+            sync_dist=True)
     return super().training_step(batch, batch_idx)
 
   def _gamma_to_alphat(self, gamma_t):
-    integral = Integral.apply(gamma_t, self.integral_cache)
-    return (self.vocab_size * integral - 1) / (
-      self.vocab_size - 1)
+      """
+      スケジュール関数 gamma_t から拡散係数 alpha_t を計算する関数。
 
-  def _prior_loss(self):
-    alpha_1 = self._gamma_to_alphat(
-      torch.tensor(self.gamma_max))
-    loss = ((alpha_1 + (1 - alpha_1) / self.vocab_size) * torch.log(
-      (self.vocab_size - 1) * alpha_1 + 1) + (
-        1 - 1 / self.vocab_size) * (1 - alpha_1) * torch.log(1 - alpha_1))
-    return loss.item()
+      Args:
+        gamma_t: torch.Tensor 型のスケジュール関数値（形状例: (B, L) や (B, 1)）。
+
+      Returns:
+        alpha_t: torch.Tensor 型の拡散係数（形状は gamma_t と同じ）。
+      """
+      # gamma_t に対して前計算したキャッシュを用いながら積分演算を適用
+      integral = Integral.apply(gamma_t, self.integral_cache)
+
+      # 語彙サイズ (V) を考慮し、積分結果から alpha_t を算出
+      # 数式: alpha_t = (V * integral - 1) / (V - 1)
+      return (self.vocab_size * integral - 1) / (
+          self.vocab_size - 1
+      )
+
+  # def _prior_loss(self):
+  #   alpha_1 = self._gamma_to_alphat(
+  #     torch.tensor(self.gamma_max))
+  #   loss = ((alpha_1 + (1 - alpha_1) / self.vocab_size) * torch.log(
+  #     (self.vocab_size - 1) * alpha_1 + 1) + (
+  #       1 - 1 / self.vocab_size) * (1 - alpha_1) * torch.log(1 - alpha_1))
+  #   return loss.item()
 
   def _q_xt_gaussian(self, x, gamma_t):
     """Computes the noisy sample xt."""
+    """
+    ガウスノイズを付加して時間ステップ t に対応するノイズサンプル x_t を生成する関数。
+
+    Args:
+        x (Tensor): 元の入力データ、形状 (batch, seq_len, dim)
+        gamma_t (Tensor): ノイズスケジュールの対数SNRに対応する値、形状 (batch,)
+
+    Returns:
+        Tensor: ノイズが付加されたデータ x_t、形状 (batch, seq_len, dim)
+    """
+    # 次元をバッチ軸に合わせて (batch, 1, 1) に拡張
     assert gamma_t.ndim == 1
     assert x.ndim == 3
     gamma_t = gamma_t.unsqueeze(-1).unsqueeze(-1)
+    # 信号成分のスケール
     alpha_t = torch.sigmoid(-gamma_t).sqrt()
+    # ノイズ成分のスケール
     sigma_t = torch.sigmoid(gamma_t).sqrt()
+    # ガウスノイズをサンプリング（標準正規分布）
     epsilon = torch.randn(x.shape, dtype=torch.float32,
                           device=self.device)
+    # ノイズ付きサンプル x_t = alpha_t * x + sigma_t * epsilon
     return alpha_t * x + sigma_t * epsilon
 
   def nll(self, x0, output_tokens,
           current_accumulation_step=None, train_mode=False):
+    """
+    拡散モデルの負の対数尤度（NLL）を計算する。カリキュラム終了前は近似 NLL を、
+    それ以降または評価モードではスーパークラスの NLL を呼び出す。
+
+    Args:
+      x0: 元のクリーンなトークンインデックス（shape: (B, L)）
+      output_tokens: 使用しない場合あり。スーパークラス呼び出し用。
+      current_accumulation_step: 学習ステップ数に基づく t のサンプリング用パラメータ
+      train_mode: 訓練モードフラグ（False なら常にスーパークラスの NLL を使用）
+
+    Returns:
+      各トークンごとの拡散損失（shape: (B, L)）
+    """
+    # カリキュラム学習終了後、または評価モードではスーパークラスの NLL を使用
     use_true_nll = (self.global_step > self.curriculum_end
                     or not train_mode)
     if use_true_nll:
       return super().nll(x0, output_tokens,
-                         current_accumulation_step)
+                        current_accumulation_step)
     del output_tokens
+
+    # サンプリングステップ t を取得 (バッチサイズ, 現在の蓄積ステップ)
     t = self._sample_t(x0.shape[0], current_accumulation_step)
     gamma_t = self.gamma_min + t * (self.gamma_max
                                     - self.gamma_min)    
@@ -529,12 +613,19 @@ class DUO(DUO_BASE):
 
 
 class Distillation(DUO):
+  """
+  Distillation:
+  - DUOベースの拡散モデルを拡張し、Teacher-Studentフレームワークで知識蒸留を行うクラス
+  - 一定ステップごとにTeacherモデルを更新し、異なるノイズレベルでの出力をKLダイバージェンスで一致させる
+  """
   def __init__(self, config, tokenizer):
     super().__init__(config, tokenizer)
+    # Teacherモデル更新の頻度 (ステップ数)
     self.update_teacher_every = config.algo.update_teacher_every
     self.save_hyperparameters()
     self.teacher = None
     self.teacher_ema = config.algo.teacher_ema
+    # 学習率や時間差dtの線形成長スケジュール設定
     self.linear_growth_dt = config.algo.linear_growth_dt
     self.linear_growth_min = config.algo.linear_growth_min
     self.linear_growth_max = config.algo.linear_growth_max
@@ -553,6 +644,10 @@ class Distillation(DUO):
       'kl-fwd', 'kl-bwd', 'posterior', 'kl-posterior'}
 
   def _maybe_update_teacher_weights(self):
+    """
+    一定ステップごとにTeacherモデルの重みを更新
+    - EMAフラグに応じて指数移動平均または単純コピー
+    """
     if self.global_step % self.update_teacher_every != 0:
       return
     if self.teacher_ema:
@@ -565,6 +660,12 @@ class Distillation(DUO):
 
   @torch.no_grad()
   def _teacher_logits(self, xt, sigma):
+    """
+    Teacherモデルの出力（logits）を取得
+    - 初回呼び出し時にStudentモデルのディープコピーを作成
+    - 必要に応じてTeacher重みを更新
+    - AMPでfloat32推論し、モデル出力を後処理して返す
+    """
     if self.teacher is None:
       self.teacher = copy.deepcopy(self.backbone)
     self._maybe_update_teacher_weights()
@@ -578,19 +679,26 @@ class Distillation(DUO):
 
   def _sample_trajectory(self, x0, gamma_t, gamma_s):
     """Computes the noisy sample xt."""
+    """
+    2つの時刻 t, s に対応するノイズサンプル x_t, x_s を生成
+    - x0 をワンホット化し、対応するalpha/sigmaでノイズ付加
+    """
     assert gamma_t.ndim == 1
     assert gamma_s.ndim == 1
     assert x0.ndim == 2
     x0 = F.one_hot(x0, self.vocab_size).to(
       self.dtype).to(self.device)
+    # t のalpha, sigma計算
     gamma_t = gamma_t.unsqueeze(-1).unsqueeze(-1)
     alpha_t = torch.sigmoid(-gamma_t).sqrt()
     sigma_t = torch.sigmoid(gamma_t).sqrt()
 
+    # s のalpha, sigma計算
     gamma_s = gamma_s.unsqueeze(-1).unsqueeze(-1)
     alpha_s = torch.sigmoid(-gamma_s).sqrt()
     sigma_s = torch.sigmoid(gamma_s).sqrt()
     
+    # 同じノイズepsilonを共有してサンプリング
     epsilon = torch.randn(x0.shape, dtype=torch.float32,
                           device=self.device)
     xt = alpha_t * x0 + sigma_t * epsilon
@@ -598,20 +706,35 @@ class Distillation(DUO):
     return xt, xs
 
   def _compute_dt(self):
+    """
+    蒸留時のdt値を計算
+    - 線形成長フラグがTrueならglobal_stepに応じて線形増加
+    - それ以外は指数的増加: 2^n / T
+    """
     if self.linear_growth_dt:
       scale = self.global_step / self.trainer.max_steps
       return self.linear_growth_min + scale * (
         self.linear_growth_max -  self.linear_growth_min)
+    # update_teacher_every ごとに指数増加
     n = self.global_step // self.update_teacher_every
     return 2 ** n / self.T
 
   def nll(self, x0, output_tokens,
           current_accumulation_step=None, train_mode=None):
+    """
+    蒸留用のNLL計算
+    - t + dt, t-dt に対応するgammaを計算
+    - x_t, x_s をサンプリング
+    - Student/Teacherの出力を取得
+    - loss_typeに応じたKLダイバージェンスを返す
+    """
     del output_tokens, train_mode
+    # tサンプリング & dt計算
     t = self._sample_t(x0.shape[0], current_accumulation_step)
     dt = self._compute_dt()
     t = torch.clip(t + dt, 0, 1)
 
+    # gamma_t, gamma_sを連続から計算
     gamma_t = self.gamma_min + t * (self.gamma_max
                                     - self.gamma_min)
     gamma_s = self.gamma_min + (
@@ -624,16 +747,22 @@ class Distillation(DUO):
     usdm_alpha_s = usdm_alpha_s.unsqueeze(-1)
     assert usdm_alpha_s.ndim == 2
 
+    # ノイズ付きサンプル生成
     xt, xs = self._sample_trajectory(x0, gamma_t, gamma_s)
+    # 離散化: argmax 対応
     xt_discrete = xt.argmax(-1)
     xs_discrete = xs.argmax(-1)
+    # Student/Teacherのlog確率取得
     log_x_theta_student = self.forward(
       xt_discrete, sigma=self._sigma_from_alphat(usdm_alpha_t))
     log_x_theta_teacher = self._teacher_logits(
       xs_discrete, sigma=self._sigma_from_alphat(usdm_alpha_s))
+    
     if self.config.training.loss_precision == 'float64':
       log_x_theta_student = log_x_theta_student.to(torch.float64)
       log_x_theta_teacher = log_x_theta_teacher.to(torch.float64)
+
+    # KLダイバージェンス計算
     if self.loss_type == 'kl-fwd':
       return (log_x_theta_teacher.exp() * (
         log_x_theta_teacher - log_x_theta_student)).sum(-1)
@@ -643,8 +772,8 @@ class Distillation(DUO):
     
   def training_step(self, batch, batch_idx):
     self.log(name='dt',
-             value=self._compute_dt(),
-             on_step=True,
-             on_epoch=False,
-             sync_dist=True)
+            value=self._compute_dt(),
+            on_step=True,
+            on_epoch=False,
+            sync_dist=True)
     return super().training_step(batch, batch_idx)
